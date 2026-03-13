@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>請求書チェッカー｜株式会社十六小節</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Helvetica Neue', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', sans-serif; background: #f0f2f5; color: #1a1a2e; }
+
+.header { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: white; padding: 24px 32px; }
+.header h1 { font-size: 22px; font-weight: 700; }
+.header p { font-size: 13px; opacity: 0.7; margin-top: 4px; }
+
+.container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+/* Drop Zone */
+.drop-zone {
+  border: 3px dashed #c0c4cc; border-radius: 16px; padding: 48px; text-align: center;
+  background: white; cursor: pointer; transition: all 0.3s;
+}
+.drop-zone:hover, .drop-zone.dragover { border-color: #4361ee; background: #f0f4ff; }
+.drop-zone-icon { font-size: 48px; margin-bottom: 12px; }
+.drop-zone-text { font-size: 16px; color: #666; }
+.drop-zone-sub { font-size: 13px; color: #999; margin-top: 8px; }
+
+/* Progress */
+.progress-bar { background: #e9ecef; border-radius: 8px; height: 8px; margin: 16px 0; display: none; }
+.progress-fill { background: #4361ee; height: 100%; border-radius: 8px; transition: width 0.3s; width: 0%; }
+.progress-text { font-size: 13px; color: #666; text-align: center; display: none; }
+
+/* Summary Cards */
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin: 24px 0; }
+.card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.card-label { font-size: 12px; color: #888; margin-bottom: 4px; }
+.card-value { font-size: 24px; font-weight: 700; }
+.card-value.green { color: #2ecc71; }
+.card-value.red { color: #e74c3c; }
+.card-value.blue { color: #4361ee; }
+.card-value.orange { color: #f39c12; }
+
+/* Tabs */
+.tabs { display: flex; gap: 0; margin: 24px 0 0; border-bottom: 2px solid #e0e0e0; }
+.tab { padding: 12px 24px; cursor: pointer; font-size: 14px; font-weight: 600; color: #888; border-bottom: 3px solid transparent; transition: all 0.2s; }
+.tab:hover { color: #4361ee; }
+.tab.active { color: #4361ee; border-bottom-color: #4361ee; }
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* Table */
+.table-wrap { background: white; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); overflow-x: auto; margin-top: 16px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { background: #f8f9fa; padding: 12px 16px; text-align: left; font-weight: 600; color: #555; border-bottom: 2px solid #e9ecef; white-space: nowrap; }
+td { padding: 10px 16px; border-bottom: 1px solid #f0f0f0; }
+tr:hover { background: #fafbff; }
+.amount { text-align: right; font-variant-numeric: tabular-nums; }
+.status-ok { color: #2ecc71; font-weight: 700; }
+.status-warn { color: #f39c12; font-weight: 700; }
+.status-err { color: #e74c3c; font-weight: 700; }
+
+/* Aggregation */
+.agg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+@media (max-width: 768px) { .agg-grid { grid-template-columns: 1fr; } }
+
+/* Export button */
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 10px 20px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; border: none; transition: all 0.2s; }
+.btn-primary { background: #4361ee; color: white; }
+.btn-primary:hover { background: #3451de; }
+.btn-outline { background: white; color: #4361ee; border: 2px solid #4361ee; }
+.btn-outline:hover { background: #f0f4ff; }
+.toolbar { display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; align-items: center; }
+
+.hidden { display: none; }
+
+/* Filter */
+.filter-input { padding: 8px 14px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px; width: 240px; }
+.filter-input:focus { outline: none; border-color: #4361ee; }
+
+select.filter-input { width: auto; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📋 請求書チェッカー</h1>
+  <p>株式会社十六小節｜PDF請求書の自動読み取り・計算チェック・集計ツール</p>
+</div>
+
+<div class="container">
+  <!-- Drop Zone -->
+  <div class="drop-zone" id="dropZone">
+    <div class="drop-zone-icon">📄</div>
+    <div class="drop-zone-text">PDFファイルをドラッグ＆ドロップ、またはクリックして選択</div>
+    <div class="drop-zone-sub">複数ファイル対応（フォルダごとドロップも可）</div>
+    <input type="file" id="fileInput" multiple accept=".pdf" style="display:none">
+  </div>
+
+  <div class="progress-bar" id="progressBar"><div class="progress-fill" id="progressFill"></div></div>
+  <div class="progress-text" id="progressText"></div>
+
+  <!-- Results (hidden until processed) -->
+  <div id="results" class="hidden">
+    <!-- Summary Cards -->
+    <div class="summary" id="summaryCards"></div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <div class="tab active" data-tab="detail">明細一覧</div>
+      <div class="tab" data-tab="check">計算チェック</div>
+      <div class="tab" data-tab="client">取引先別集計</div>
+      <div class="tab" data-tab="monthly">月別集計</div>
+    </div>
+
+    <!-- Detail Tab -->
+    <div class="tab-content active" id="tab-detail">
+      <div class="toolbar">
+        <input type="text" class="filter-input" id="filterText" placeholder="🔍 ファイル名・取引先で検索...">
+        <select class="filter-input" id="filterType">
+          <option value="all">すべて</option>
+          <option value="issued">発行（売上）</option>
+          <option value="received">受領（支払）</option>
+        </select>
+        <button class="btn btn-primary" onclick="exportCSV()">📥 CSV出力</button>
+      </div>
+      <div class="table-wrap"><table id="detailTable"></table></div>
+    </div>
+
+    <!-- Check Tab -->
+    <div class="tab-content" id="tab-check">
+      <div class="toolbar">
+        <select class="filter-input" id="filterCheck">
+          <option value="all">すべて</option>
+          <option value="error">エラーのみ</option>
+          <option value="warning">警告のみ</option>
+          <option value="ok">OKのみ</option>
+        </select>
+      </div>
+      <div class="table-wrap"><table id="checkTable"></table></div>
+    </div>
+
+    <!-- Client Tab -->
+    <div class="tab-content" id="tab-client">
+      <div class="agg-grid">
+        <div class="table-wrap"><table id="clientTable"></table></div>
+        <div class="card" id="clientChartCard"><canvas id="clientChart"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Monthly Tab -->
+    <div class="tab-content" id="tab-monthly">
+      <div class="agg-grid">
+        <div class="table-wrap"><table id="monthlyTable"></table></div>
+        <div class="card" id="monthlyChartCard"><canvas id="monthlyChart"></canvas></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+// Setup pdf.js worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+let allInvoices = [];
+
+// ===== Drop Zone =====
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  handleFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener('change', e => handleFiles(e.target.files));
+
+async function handleFiles(fileList) {
+  const pdfs = Array.from(fileList).filter(f => f.name.toLowerCase().endsWith('.pdf'));
+  if (pdfs.length === 0) { alert('PDFファイルが見つかりません'); return; }
+
+  const progressBar = document.getElementById('progressBar');
+  const progressFill = document.getElementById('progressFill');
+  const progressText = document.getElementById('progressText');
+  progressBar.style.display = 'block';
+  progressText.style.display = 'block';
+
+  allInvoices = [];
+  for (let i = 0; i < pdfs.length; i++) {
+    const pct = Math.round(((i + 1) / pdfs.length) * 100);
+    progressFill.style.width = pct + '%';
+    progressText.textContent = `処理中... ${i + 1} / ${pdfs.length}（${pdfs[i].name}）`;
+    try {
+      const inv = await parsePDF(pdfs[i]);
+      if (inv) allInvoices.push(inv);
+    } catch (e) {
+      console.error('Parse error:', pdfs[i].name, e);
+      allInvoices.push({ fileName: pdfs[i].name, error: true, errorMsg: e.message });
+    }
+  }
+
+  progressText.textContent = `完了！ ${allInvoices.length} 件の請求書を読み取りました`;
+  setTimeout(() => { progressBar.style.display = 'none'; }, 1000);
+
+  renderAll();
+}
+
+// ===== PDF Parsing =====
+async function parsePDF(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let fullText = '';
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const tc = await page.getTextContent();
+    fullText += tc.items.map(item => item.str).join(' ') + '\n';
+  }
+
+  const inv = {
+    fileName: file.name,
+    error: false,
+    date: '', client: '', items: [],
+    subtotal: null, tax: null, total: null,
+    taxRate: null, type: 'unknown',
+    registrationNo: '',
+  };
+
+  // Date extraction
+  const dateMatch = fullText.match(/令和\s*(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日/)
+    || fullText.match(/(\d{4})\s*[年\/\-]\s*(\d{1,2})\s*[月\/\-]\s*(\d{1,2})/);
+  if (dateMatch) {
+    if (fullText.match(/令和/)) {
+      const y = 2018 + parseInt(dateMatch[1]);
+      inv.date = `${y}/${dateMatch[2].padStart(2,'0')}/${dateMatch[3].padStart(2,'0')}`;
+    } else {
+      inv.date = `${dateMatch[1]}/${dateMatch[2].padStart(2,'0')}/${dateMatch[3].padStart(2,'0')}`;
+    }
+  }
+
+  // Client (宛先 or 御中)
+  const clientMatch = fullText.match(/(.{2,30}?)\s*御中/);
+  if (clientMatch) inv.client = clientMatch[1].replace(/^[\s　]+/, '').trim();
+
+  // Type detection: if "十六小節" appears near 御中 → received (支払い)
+  if (inv.client && inv.client.match(/十六小節|１６小節|16小節|ジユウロクシヨウセツ/)) {
+    inv.type = 'received';
+    // Re-extract the issuer
+    const issuerMatch = fullText.match(/御中\s+(.{2,40}?)(?:\s*〒|\s*TEL|\s*登録)/);
+    if (issuerMatch) inv.issuerName = issuerMatch[1].trim();
+  } else {
+    inv.type = 'issued';
+  }
+
+  // Registration number (インボイス)
+  const regMatch = fullText.match(/登録番号\s*[：:]?\s*(T[\d\-]+)/);
+  if (regMatch) inv.registrationNo = regMatch[1];
+
+  // Extract all yen amounts
+  const amountRegex = /[￥\\¥]\s*([\d,]+)/g;
+  const amounts = [];
+  let m;
+  while ((m = amountRegex.exec(fullText)) !== null) {
+    amounts.push(parseInt(m[1].replace(/,/g, '')));
+  }
+
+  // Heuristic: find tax and total
+  const textLower = fullText;
+
+  // Try to find labeled amounts
+  const taxMatch = textLower.match(/消費税[等額]?\s*[（(]?\s*(?:10%|8%)?\s*[）)]?\s*[￥\\¥]\s*([\d,]+)/);
+  const totalMatch = textLower.match(/(?:合計[金⾦]額|税込合計|合計⾦額|合計金額)\s*[￥\\¥]\s*([\d,]+)/)
+    || textLower.match(/(?:税込合計|合\s*計)\s*[￥\\¥]\s*([\d,]+)/);
+
+  if (taxMatch) inv.tax = parseInt(taxMatch[1].replace(/,/g, ''));
+  if (totalMatch) inv.total = parseInt(totalMatch[1].replace(/,/g, ''));
+
+  // If we have total and tax, derive subtotal
+  if (inv.total && inv.tax) {
+    inv.subtotal = inv.total - inv.tax;
+  } else if (amounts.length >= 2) {
+    // Fallback: largest = total, second largest or known pattern
+    const sorted = [...new Set(amounts)].sort((a, b) => b - a);
+    inv.total = sorted[0];
+    if (sorted.length >= 3) {
+      // Assume: subtotal, tax, total pattern
+      inv.tax = sorted[sorted.length - 1] < sorted[0] * 0.15 ? sorted[sorted.length > 2 ? sorted.length - 1 : 1] : null;
+      if (inv.tax) inv.subtotal = inv.total - inv.tax;
+    }
+  }
+
+  // Verify tax calculation
+  if (inv.subtotal && inv.tax) {
+    const expected10 = Math.round(inv.subtotal * 0.10);
+    const expected8 = Math.round(inv.subtotal * 0.08);
+    if (inv.tax === expected10) {
+      inv.taxRate = 10;
+      inv.taxCheck = 'ok';
+    } else if (inv.tax === expected8) {
+      inv.taxRate = 8;
+      inv.taxCheck = 'ok';
+    } else if (Math.abs(inv.tax - expected10) <= 1) {
+      inv.taxRate = 10;
+      inv.taxCheck = 'ok'; // rounding diff
+    } else if (Math.abs(inv.tax - expected8) <= 1) {
+      inv.taxRate = 8;
+      inv.taxCheck = 'ok';
+    } else {
+      inv.taxCheck = 'error';
+      inv.taxCheckMsg = `税額不一致: 税抜${inv.subtotal.toLocaleString()}円 × 10% = ${expected10.toLocaleString()}円 ≠ ${inv.tax.toLocaleString()}円`;
+    }
+  } else {
+    inv.taxCheck = 'warning';
+    inv.taxCheckMsg = '金額の読み取りが不完全です';
+  }
+
+  // Total check
+  if (inv.subtotal && inv.tax && inv.total) {
+    const expectedTotal = inv.subtotal + inv.tax;
+    if (expectedTotal === inv.total) {
+      inv.totalCheck = 'ok';
+    } else if (Math.abs(expectedTotal - inv.total) <= 1) {
+      inv.totalCheck = 'ok';
+    } else {
+      inv.totalCheck = 'error';
+      inv.totalCheckMsg = `合計不一致: ${inv.subtotal.toLocaleString()} + ${inv.tax.toLocaleString()} = ${expectedTotal.toLocaleString()} ≠ ${inv.total.toLocaleString()}`;
+    }
+  } else {
+    inv.totalCheck = 'warning';
+  }
+
+  // Extract month from filename or date
+  const monthFromFile = file.name.match(/(\d{4})[_\-](\d{1,2})/);
+  const monthFromDate = inv.date ? inv.date.match(/(\d{4})\/(\d{2})/) : null;
+  if (monthFromDate) inv.month = `${monthFromDate[1]}/${monthFromDate[2]}`;
+  else if (monthFromFile) inv.month = `${monthFromFile[1]}/${monthFromFile[2].padStart(2,'0')}`;
+
+  return inv;
+}
+
+// ===== Rendering =====
+function renderAll() {
+  document.getElementById('results').classList.remove('hidden');
+  renderSummary();
+  renderDetailTable();
+  renderCheckTable();
+  renderClientAgg();
+  renderMonthlyAgg();
+}
+
+function fmt(n) {
+  if (n == null) return '—';
+  return '¥' + n.toLocaleString();
+}
+
+function renderSummary() {
+  const issued = allInvoices.filter(i => i.type === 'issued');
+  const received = allInvoices.filter(i => i.type === 'received');
+  const errors = allInvoices.filter(i => i.taxCheck === 'error' || i.totalCheck === 'error');
+  const totalIssued = issued.reduce((s, i) => s + (i.total || 0), 0);
+  const totalReceived = received.reduce((s, i) => s + (i.total || 0), 0);
+
+  document.getElementById('summaryCards').innerHTML = `
+    <div class="card"><div class="card-label">読み取り件数</div><div class="card-value blue">${allInvoices.length}件</div></div>
+    <div class="card"><div class="card-label">発行（売上）</div><div class="card-value green">${fmt(totalIssued)}</div><div class="card-label">${issued.length}件</div></div>
+    <div class="card"><div class="card-label">受領（支払）</div><div class="card-value orange">${fmt(totalReceived)}</div><div class="card-label">${received.length}件</div></div>
+    <div class="card"><div class="card-label">計算エラー</div><div class="card-value ${errors.length > 0 ? 'red' : 'green'}">${errors.length}件</div></div>
+    <div class="card"><div class="card-label">差引（売上−支払）</div><div class="card-value ${totalIssued - totalReceived >= 0 ? 'blue' : 'red'}">${fmt(totalIssued - totalReceived)}</div></div>
+  `;
+}
+
+function renderDetailTable() {
+  const table = document.getElementById('detailTable');
+  let html = `<thead><tr>
+    <th>ファイル名</th><th>日付</th><th>取引先</th><th>種別</th>
+    <th class="amount">税抜金額</th><th class="amount">消費税</th><th class="amount">合計</th><th>ステータス</th>
+  </tr></thead><tbody>`;
+
+  for (const inv of allInvoices) {
+    if (inv.error) {
+      html += `<tr><td>${inv.fileName}</td><td colspan="6">読み取りエラー: ${inv.errorMsg || ''}</td><td class="status-err">⚠ エラー</td></tr>`;
+      continue;
+    }
+    const typeLabel = inv.type === 'issued' ? '📤 発行' : inv.type === 'received' ? '📥 受領' : '❓';
+    const status = inv.taxCheck === 'error' || inv.totalCheck === 'error'
+      ? '<span class="status-err">❌ エラー</span>'
+      : inv.taxCheck === 'warning' ? '<span class="status-warn">⚠ 要確認</span>'
+      : '<span class="status-ok">✅ OK</span>';
+    html += `<tr>
+      <td title="${inv.fileName}">${inv.fileName.length > 35 ? inv.fileName.slice(0,35)+'...' : inv.fileName}</td>
+      <td>${inv.date || '—'}</td>
+      <td>${inv.client || '—'}</td>
+      <td>${typeLabel}</td>
+      <td class="amount">${fmt(inv.subtotal)}</td>
+      <td class="amount">${fmt(inv.tax)}</td>
+      <td class="amount" style="font-weight:700">${fmt(inv.total)}</td>
+      <td>${status}</td>
+    </tr>`;
+  }
+  html += '</tbody>';
+  table.innerHTML = html;
+
+  // Wire up filters
+  document.getElementById('filterText').oninput = filterDetail;
+  document.getElementById('filterType').onchange = filterDetail;
+}
+
+function filterDetail() {
+  const text = document.getElementById('filterText').value.toLowerCase();
+  const type = document.getElementById('filterType').value;
+  const rows = document.querySelectorAll('#detailTable tbody tr');
+  rows.forEach(row => {
+    const rowText = row.textContent.toLowerCase();
+    const matchText = !text || rowText.includes(text);
+    const matchType = type === 'all' || rowText.includes(type === 'issued' ? '発行' : '受領');
+    row.style.display = matchText && matchType ? '' : 'none';
+  });
+}
+
+function renderCheckTable() {
+  const table = document.getElementById('checkTable');
+  let html = `<thead><tr>
+    <th>ファイル名</th><th class="amount">税抜</th><th class="amount">消費税</th>
+    <th>税率</th><th class="amount">期待税額</th><th>税額チェック</th>
+    <th class="amount">合計</th><th>合計チェック</th><th>詳細</th>
+  </tr></thead><tbody>`;
+
+  for (const inv of allInvoices) {
+    if (inv.error) continue;
+    const expectedTax = inv.subtotal ? Math.round(inv.subtotal * 0.10) : null;
+    const taxStatus = inv.taxCheck === 'ok' ? '<span class="status-ok">✅</span>'
+      : inv.taxCheck === 'error' ? '<span class="status-err">❌</span>' : '<span class="status-warn">⚠</span>';
+    const totalStatus = inv.totalCheck === 'ok' ? '<span class="status-ok">✅</span>'
+      : inv.totalCheck === 'error' ? '<span class="status-err">❌</span>' : '<span class="status-warn">⚠</span>';
+    html += `<tr>
+      <td>${inv.fileName.length > 30 ? inv.fileName.slice(0,30)+'...' : inv.fileName}</td>
+      <td class="amount">${fmt(inv.subtotal)}</td>
+      <td class="amount">${fmt(inv.tax)}</td>
+      <td>${inv.taxRate ? inv.taxRate + '%' : '—'}</td>
+      <td class="amount">${fmt(expectedTax)}</td>
+      <td>${taxStatus}</td>
+      <td class="amount" style="font-weight:700">${fmt(inv.total)}</td>
+      <td>${totalStatus}</td>
+      <td style="font-size:12px;color:#888">${inv.taxCheckMsg || inv.totalCheckMsg || '—'}</td>
+    </tr>`;
+  }
+  html += '</tbody>';
+  table.innerHTML = html;
+
+  document.getElementById('filterCheck').onchange = () => {
+    const filter = document.getElementById('filterCheck').value;
+    document.querySelectorAll('#checkTable tbody tr').forEach(row => {
+      if (filter === 'all') { row.style.display = ''; return; }
+      const has = row.innerHTML.includes(filter === 'error' ? '❌' : filter === 'warning' ? '⚠' : '✅');
+      row.style.display = has ? '' : 'none';
+    });
+  };
+}
+
+function renderClientAgg() {
+  const clientMap = {};
+  allInvoices.filter(i => !i.error).forEach(inv => {
+    const key = inv.client || '不明';
+    if (!clientMap[key]) clientMap[key] = { count: 0, total: 0, type: inv.type };
+    clientMap[key].count++;
+    clientMap[key].total += inv.total || 0;
+  });
+
+  const sorted = Object.entries(clientMap).sort((a, b) => b[1].total - a[1].total);
+  let html = `<thead><tr><th>取引先</th><th>種別</th><th>件数</th><th class="amount">合計金額</th></tr></thead><tbody>`;
+  sorted.forEach(([name, d]) => {
+    html += `<tr><td>${name}</td><td>${d.type === 'issued' ? '売上' : '支払'}</td><td>${d.count}</td><td class="amount" style="font-weight:700">${fmt(d.total)}</td></tr>`;
+  });
+  html += '</tbody>';
+  document.getElementById('clientTable').innerHTML = html;
+
+  // Chart
+  const top10 = sorted.slice(0, 10);
+  new Chart(document.getElementById('clientChart'), {
+    type: 'bar',
+    data: {
+      labels: top10.map(([n]) => n.length > 10 ? n.slice(0,10)+'…' : n),
+      datasets: [{
+        label: '合計金額（円）',
+        data: top10.map(([,d]) => d.total),
+        backgroundColor: top10.map(([,d]) => d.type === 'issued' ? '#4361ee' : '#f39c12'),
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      plugins: { legend: { display: false }, title: { display: true, text: '取引先別 金額 TOP10' } },
+      scales: { x: { ticks: { callback: v => '¥' + (v/10000).toFixed(0) + '万' } } }
+    }
+  });
+}
+
+function renderMonthlyAgg() {
+  const monthMap = {};
+  allInvoices.filter(i => !i.error && i.month).forEach(inv => {
+    if (!monthMap[inv.month]) monthMap[inv.month] = { issued: 0, received: 0, issuedCount: 0, receivedCount: 0 };
+    if (inv.type === 'issued') { monthMap[inv.month].issued += inv.total || 0; monthMap[inv.month].issuedCount++; }
+    else { monthMap[inv.month].received += inv.total || 0; monthMap[inv.month].receivedCount++; }
+  });
+
+  const sorted = Object.entries(monthMap).sort((a, b) => a[0].localeCompare(b[0]));
+  let html = `<thead><tr><th>月</th><th>売上件数</th><th class="amount">売上合計</th><th>支払件数</th><th class="amount">支払合計</th><th class="amount">差引</th></tr></thead><tbody>`;
+  sorted.forEach(([month, d]) => {
+    const diff = d.issued - d.received;
+    html += `<tr><td>${month}</td><td>${d.issuedCount}</td><td class="amount" style="color:#4361ee">${fmt(d.issued)}</td>
+      <td>${d.receivedCount}</td><td class="amount" style="color:#f39c12">${fmt(d.received)}</td>
+      <td class="amount" style="font-weight:700;color:${diff >= 0 ? '#2ecc71' : '#e74c3c'}">${fmt(diff)}</td></tr>`;
+  });
+  html += '</tbody>';
+  document.getElementById('monthlyTable').innerHTML = html;
+
+  // Chart
+  new Chart(document.getElementById('monthlyChart'), {
+    type: 'bar',
+    data: {
+      labels: sorted.map(([m]) => m),
+      datasets: [
+        { label: '売上', data: sorted.map(([,d]) => d.issued), backgroundColor: '#4361ee' },
+        { label: '支払', data: sorted.map(([,d]) => d.received), backgroundColor: '#f39c12' },
+      ]
+    },
+    options: {
+      responsive: true,
+      plugins: { title: { display: true, text: '月別 売上 vs 支払' } },
+      scales: { y: { ticks: { callback: v => '¥' + (v/10000).toFixed(0) + '万' } } }
+    }
+  });
+}
+
+// ===== CSV Export =====
+function exportCSV() {
+  const BOM = '\uFEFF';
+  let csv = BOM + 'ファイル名,日付,取引先,種別,税抜金額,消費税,合計金額,税率,税額チェック,合計チェック\n';
+  allInvoices.filter(i => !i.error).forEach(inv => {
+    csv += `"${inv.fileName}","${inv.date}","${inv.client}","${inv.type === 'issued' ? '発行' : '受領'}",${inv.subtotal || ''},${inv.tax || ''},${inv.total || ''},${inv.taxRate || ''},${inv.taxCheck},${inv.totalCheck}\n`;
+  });
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `請求書チェック_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+}
+
+// ===== Tab Switching =====
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+  });
+});
+</script>
+</body>
+</html>
