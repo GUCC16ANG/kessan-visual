@@ -31,10 +31,11 @@ body { font-family: 'Helvetica Neue', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 
 .progress-text { font-size: 13px; color: #666; text-align: center; display: none; }
 
 /* Summary Cards */
-.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin: 24px 0; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin: 24px 0; }
 .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
 .card-label { font-size: 12px; color: #888; margin-bottom: 4px; }
-.card-value { font-size: 24px; font-weight: 700; }
+.card-value { font-size: 22px; font-weight: 700; }
+.card-sub { font-size: 13px; color: #999; margin-top: 2px; }
 .card-value.green { color: #2ecc71; }
 .card-value.red { color: #e74c3c; }
 .card-value.blue { color: #4361ee; }
@@ -79,22 +80,26 @@ tr:hover { background: #fafbff; }
 .filter-input:focus { outline: none; border-color: #4361ee; }
 
 select.filter-input { width: auto; }
+
+.file-type-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.badge-pdf { background: #fee2e2; color: #dc2626; }
+.badge-doc { background: #dbeafe; color: #2563eb; }
 </style>
 </head>
 <body>
 
 <div class="header">
   <h1>📋 請求書チェッカー</h1>
-  <p>株式会社十六小節｜PDF請求書の自動読み取り・計算チェック・集計ツール</p>
+  <p>株式会社十六小節｜PDF・Word請求書の自動読み取り・計算チェック・集計ツール</p>
 </div>
 
 <div class="container">
   <!-- Drop Zone -->
   <div class="drop-zone" id="dropZone">
     <div class="drop-zone-icon">📄</div>
-    <div class="drop-zone-text">PDFファイルをドラッグ＆ドロップ、またはクリックして選択</div>
-    <div class="drop-zone-sub">複数ファイル対応（フォルダごとドロップも可）</div>
-    <input type="file" id="fileInput" multiple accept=".pdf" style="display:none">
+    <div class="drop-zone-text">PDF・Wordファイルをドラッグ＆ドロップ、またはクリックして選択</div>
+    <div class="drop-zone-sub">対応形式: .pdf / .doc / .docx ｜複数ファイル・フォルダ対応</div>
+    <input type="file" id="fileInput" multiple accept=".pdf,.doc,.docx" style="display:none">
   </div>
 
   <div class="progress-bar" id="progressBar"><div class="progress-fill" id="progressFill"></div></div>
@@ -175,13 +180,55 @@ dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover
 dropZone.addEventListener('drop', e => {
   e.preventDefault();
   dropZone.classList.remove('dragover');
-  handleFiles(e.dataTransfer.files);
+  // Support folder drop via webkitGetAsEntry
+  const items = e.dataTransfer.items;
+  if (items && items[0] && items[0].webkitGetAsEntry) {
+    const entries = [];
+    for (let i = 0; i < items.length; i++) {
+      const entry = items[i].webkitGetAsEntry();
+      if (entry) entries.push(entry);
+    }
+    collectFilesFromEntries(entries).then(files => handleFiles(files));
+  } else {
+    handleFiles(e.dataTransfer.files);
+  }
 });
 fileInput.addEventListener('change', e => handleFiles(e.target.files));
 
+// Recursively collect files from directory entries
+async function collectFilesFromEntries(entries) {
+  const files = [];
+  async function readEntry(entry) {
+    if (entry.isFile) {
+      const file = await new Promise(resolve => entry.file(resolve));
+      files.push(file);
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      // readEntries may not return all entries at once — must call repeatedly
+      let allSubEntries = [];
+      let batch;
+      do {
+        batch = await new Promise(resolve => reader.readEntries(resolve));
+        allSubEntries = allSubEntries.concat(batch);
+      } while (batch.length > 0);
+      for (const sub of allSubEntries) {
+        await readEntry(sub);
+      }
+    }
+  }
+  for (const entry of entries) {
+    await readEntry(entry);
+  }
+  return files;
+}
+
 async function handleFiles(fileList) {
-  const pdfs = Array.from(fileList).filter(f => f.name.toLowerCase().endsWith('.pdf'));
-  if (pdfs.length === 0) { alert('PDFファイルが見つかりません'); return; }
+  const supportedExts = ['.pdf', '.doc', '.docx'];
+  const files = Array.from(fileList).filter(f => {
+    const ext = f.name.toLowerCase().slice(f.name.lastIndexOf('.'));
+    return supportedExts.includes(ext) && !f.name.startsWith('~$') && !f.name.startsWith('.');
+  });
+  if (files.length === 0) { alert('対応ファイルが見つかりません（PDF / Word）'); return; }
 
   const progressBar = document.getElementById('progressBar');
   const progressFill = document.getElementById('progressFill');
@@ -190,16 +237,24 @@ async function handleFiles(fileList) {
   progressText.style.display = 'block';
 
   allInvoices = [];
-  for (let i = 0; i < pdfs.length; i++) {
-    const pct = Math.round(((i + 1) / pdfs.length) * 100);
+  for (let i = 0; i < files.length; i++) {
+    const pct = Math.round(((i + 1) / files.length) * 100);
     progressFill.style.width = pct + '%';
-    progressText.textContent = `処理中... ${i + 1} / ${pdfs.length}（${pdfs[i].name}）`;
+    progressText.textContent = `処理中... ${i + 1} / ${files.length}（${files[i].name}）`;
     try {
-      const inv = await parsePDF(pdfs[i]);
+      const ext = files[i].name.toLowerCase().slice(files[i].name.lastIndexOf('.'));
+      let inv;
+      if (ext === '.pdf') {
+        inv = await parsePDF(files[i]);
+      } else if (ext === '.doc') {
+        inv = await parseDOC(files[i]);
+      } else if (ext === '.docx') {
+        inv = await parseDOCX(files[i]);
+      }
       if (inv) allInvoices.push(inv);
     } catch (e) {
-      console.error('Parse error:', pdfs[i].name, e);
-      allInvoices.push({ fileName: pdfs[i].name, error: true, errorMsg: e.message });
+      console.error('Parse error:', files[i].name, e);
+      allInvoices.push({ fileName: files[i].name, error: true, errorMsg: e.message });
     }
   }
 
@@ -210,7 +265,6 @@ async function handleFiles(fileList) {
 }
 
 // ===== CJK Radicals Normalization =====
-// CJK Kangxi Radicals (U+2F00-U+2FD5) → Standard CJK Unified Ideographs
 const CJK_RADICAL_MAP = {
   "\u2F00": "\u4E00", "\u2F01": "\u4E28", "\u2F02": "\u4E36", "\u2F03": "\u4E3F", "\u2F04": "\u4E59",
   "\u2F05": "\u4E85", "\u2F06": "\u4E8C", "\u2F07": "\u4EA0", "\u2F08": "\u4EBA", "\u2F09": "\u513F",
@@ -258,24 +312,17 @@ const CJK_RADICAL_MAP = {
 };
 
 function normalizeCJK(text) {
-  // Replace CJK Kangxi Radicals with standard CJK equivalents
   let result = '';
   for (const ch of text) {
     result += CJK_RADICAL_MAP[ch] || ch;
   }
-  // Normalize fullwidth digits to ASCII
   result = result.replace(/[\uFF10-\uFF19]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFF10 + 0x30));
-  // Normalize fullwidth comma
   result = result.replace(/\uFF0C/g, ',');
   return result;
 }
 
 function normalizeYenAmounts(text) {
-  // PDF.js often extracts yen amounts with spaces between digits:
-  //   "￥ 528 ,000" or "￥ 2 4 , 0 00" or "￥ 2 97 , 00 0"
-  // This function collapses those spaces to produce clean amounts like "￥528,000"
   return text.replace(/([￥¥\\])\s*([\d\s,]+)/g, (match, yen, numPart) => {
-    // Remove all spaces from the number portion
     const clean = numPart.replace(/\s+/g, '');
     return yen + clean;
   });
@@ -290,18 +337,16 @@ async function extractTextFromPDF(pdf) {
     const viewport = page.getViewport({ scale: 1.0 });
     const pageHeight = viewport.height;
 
-    // Collect items with position info
     const items = tc.items
       .filter(item => item.str.trim().length > 0)
       .map(item => ({
         text: item.str,
-        x: Math.round(item.transform[4]),        // x position
-        y: Math.round(pageHeight - item.transform[5]), // flip y (PDF y=0 is bottom)
+        x: Math.round(item.transform[4]),
+        y: Math.round(pageHeight - item.transform[5]),
         width: item.width,
         height: item.height,
       }));
 
-    // Group items by approximate y-position (same line if within 5px)
     const lineGroups = [];
     const sortedByY = [...items].sort((a, b) => a.y - b.y);
 
@@ -318,7 +363,6 @@ async function extractTextFromPDF(pdf) {
     }
     if (currentLine.length > 0) lineGroups.push(currentLine);
 
-    // Sort items within each line by x-position and join
     for (const line of lineGroups) {
       line.sort((a, b) => a.x - b.x);
       const lineText = line.map(item => item.text).join(' ');
@@ -328,18 +372,162 @@ async function extractTextFromPDF(pdf) {
   return allLines.join('\n');
 }
 
-// ===== PDF Parsing =====
-async function parsePDF(file) {
+// ===== Word (.doc) text extraction =====
+async function extractTextFromDOC(file) {
   const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const data = new Uint8Array(arrayBuffer);
 
-  // Extract text with position-aware line reconstruction
-  const rawText = await extractTextFromPDF(pdf);
-  // Normalize CJK radicals to standard characters, then fix spaced-out yen amounts
-  const fullText = normalizeYenAmounts(normalizeCJK(rawText));
+  // Decode as UTF-16LE (Japanese .doc files store text this way)
+  const decoder = new TextDecoder('utf-16le', { fatal: false });
+  const text = decoder.decode(data);
+
+  // Clean control characters but keep Japanese text
+  let clean = text.replace(/[\x00-\x08\x0e-\x1f]/g, '');
+
+  return clean;
+}
+
+// ===== Word (.docx) text extraction =====
+async function extractTextFromDOCX(file) {
+  // .docx is a ZIP file containing XML
+  const arrayBuffer = await file.arrayBuffer();
+  const data = new Uint8Array(arrayBuffer);
+
+  // Simple ZIP parser to find word/document.xml
+  const files = parseZip(data);
+  const docXml = files['word/document.xml'];
+  if (!docXml) return '';
+
+  const text = new TextDecoder('utf-8').decode(docXml);
+  // Extract text from XML tags: <w:t>text</w:t> and <w:t xml:space="preserve">text</w:t>
+  const matches = text.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
+  return matches.map(m => m.replace(/<[^>]+>/g, '')).join(' ');
+}
+
+// Minimal ZIP parser
+function parseZip(data) {
+  const files = {};
+  const view = new DataView(data.buffer);
+
+  // Find end of central directory
+  let eocdOffset = -1;
+  for (let i = data.length - 22; i >= 0; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset === -1) return files;
+
+  const centralDirOffset = view.getUint32(eocdOffset + 16, true);
+  let offset = centralDirOffset;
+
+  while (offset < eocdOffset && view.getUint32(offset, true) === 0x02014b50) {
+    const compMethod = view.getUint16(offset + 10, true);
+    const compSize = view.getUint32(offset + 20, true);
+    const uncompSize = view.getUint32(offset + 24, true);
+    const nameLen = view.getUint16(offset + 28, true);
+    const extraLen = view.getUint16(offset + 30, true);
+    const commentLen = view.getUint16(offset + 32, true);
+    const localHeaderOffset = view.getUint32(offset + 42, true);
+
+    const name = new TextDecoder().decode(data.slice(offset + 46, offset + 46 + nameLen));
+
+    // Read from local header
+    if (compMethod === 0 && uncompSize > 0) { // stored (no compression)
+      const localNameLen = view.getUint16(localHeaderOffset + 26, true);
+      const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+      const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+      files[name] = data.slice(dataStart, dataStart + uncompSize);
+    } else if (compMethod === 8) { // deflate
+      const localNameLen = view.getUint16(localHeaderOffset + 26, true);
+      const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+      const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+      const compressed = data.slice(dataStart, dataStart + compSize);
+      try {
+        const ds = new DecompressionStream('deflate-raw');
+        // Use sync approach with Response
+        const blob = new Blob([compressed]);
+        const stream = blob.stream().pipeThrough(ds);
+        // Store as promise that we'll need to resolve
+        files[name] = { compressed, stream, isAsync: true };
+      } catch(e) {
+        // fallback: skip compressed files
+      }
+    }
+
+    offset += 46 + nameLen + extraLen + commentLen;
+  }
+
+  return files;
+}
+
+// Async version of DOCX extraction
+async function extractTextFromDOCXAsync(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const data = new Uint8Array(arrayBuffer);
+  const view = new DataView(data.buffer);
+
+  // Find end of central directory
+  let eocdOffset = -1;
+  for (let i = data.length - 22; i >= 0; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset === -1) return '';
+
+  const centralDirOffset = view.getUint32(eocdOffset + 16, true);
+  let offset = centralDirOffset;
+
+  while (offset < eocdOffset && view.getUint32(offset, true) === 0x02014b50) {
+    const compMethod = view.getUint16(offset + 10, true);
+    const compSize = view.getUint32(offset + 20, true);
+    const uncompSize = view.getUint32(offset + 24, true);
+    const nameLen = view.getUint16(offset + 28, true);
+    const extraLen = view.getUint16(offset + 30, true);
+    const commentLen = view.getUint16(offset + 32, true);
+    const localHeaderOffset = view.getUint32(offset + 42, true);
+
+    const name = new TextDecoder().decode(data.slice(offset + 46, offset + 46 + nameLen));
+
+    if (name === 'word/document.xml') {
+      const localNameLen = view.getUint16(localHeaderOffset + 26, true);
+      const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+      const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+
+      let xmlBytes;
+      if (compMethod === 0) {
+        xmlBytes = data.slice(dataStart, dataStart + uncompSize);
+      } else if (compMethod === 8) {
+        const compressed = data.slice(dataStart, dataStart + compSize);
+        const ds = new DecompressionStream('deflate-raw');
+        const blob = new Blob([compressed]);
+        const decompressed = await new Response(blob.stream().pipeThrough(ds)).arrayBuffer();
+        xmlBytes = new Uint8Array(decompressed);
+      }
+
+      if (xmlBytes) {
+        const xml = new TextDecoder('utf-8').decode(xmlBytes);
+        const matches = xml.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
+        return matches.map(m => m.replace(/<[^>]+>/g, '')).join(' ');
+      }
+    }
+
+    offset += 46 + nameLen + extraLen + commentLen;
+  }
+
+  return '';
+}
+
+// ===== Common invoice parsing from text =====
+function parseInvoiceText(text, fileName, fileType) {
+  const fullText = normalizeYenAmounts(normalizeCJK(text));
 
   const inv = {
-    fileName: file.name,
+    fileName: fileName,
+    fileType: fileType,
     error: false,
     date: '', client: '', items: [],
     subtotal: null, tax: null, total: null,
@@ -347,7 +535,7 @@ async function parsePDF(file) {
     registrationNo: '',
   };
 
-  // Date extraction - handle various spacing patterns
+  // Date extraction
   const dateMatch = fullText.match(/令\s*和\s*(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日/)
     || fullText.match(/(\d{4})\s*[年\/\-]\s*(\d{1,2})\s*[月\/\-]\s*(\d{1,2})/);
   if (dateMatch) {
@@ -359,56 +547,76 @@ async function parsePDF(file) {
     }
   }
 
-  // Client (宛先 or 御中) - handle spaced characters
+  // Client
   const clientMatch = fullText.match(/(.{2,40}?)\s*御\s*中/);
-  if (clientMatch) inv.client = clientMatch[1].replace(/^[\s　]+/, '').replace(/[\s　]+$/,'').trim();
+  if (clientMatch) inv.client = clientMatch[1].replace(/^[\s\u3000]+/, '').replace(/[\s\u3000]+$/,'').trim();
 
-  // Type detection: if "十六小節" appears in the client name → received (支払い)
+  // Type detection
   if (inv.client && inv.client.match(/十六小節|１６小節|16小節|ジユウロクシヨウセツ/)) {
     inv.type = 'received';
-    const issuerMatch = fullText.match(/御\s*中[\s\S]{0,20}?([^\s\n]{2,40}?)(?:\s*〒|\s*TEL|\s*登録)/);
+    const issuerMatch = fullText.match(/御\s*中[\s\S]{0,50}?([^\s\n]{2,40}?)(?:\s*〒|\s*TEL|\s*登録)/);
     if (issuerMatch) inv.issuerName = issuerMatch[1].trim();
   } else {
     inv.type = 'issued';
   }
 
-  // Registration number (インボイス)
+  // Registration number
   const regMatch = fullText.match(/登録番号\s*[：:]?\s*(T[\d\-]+)/);
   if (regMatch) inv.registrationNo = regMatch[1];
 
-  // ===== Amount extraction - multiple strategies =====
+  // ===== Amount extraction =====
 
-  // Strategy 1: Find labeled amounts (tax, total) with flexible patterns
-  // After CJK normalization, ⾦→金 and ⽉→月, so we can use standard characters
-  const yenPattern = '[￥¥\\\\￥]\s*';
-  const amountPattern = '([\\d,]+)';
-
-  // Tax: 消費税 ... ￥ amount
+  // Tax: 消費税
+  // IMPORTANT: "消費税込" means "tax-included" — must NOT match as tax amount
   let taxVal = null;
   const taxPatterns = [
     /消\s*費\s*税[等額]?\s*[（(]?\s*(?:10%|8%)?\s*[）)]?\s*[￥¥\\]\s*([\d,]+)/,
     /消\s*費\s*税\s*[￥¥\\]\s*([\d,]+)/,
-    /消\s*費\s*税[^￥¥\\\d\n]{0,20}[￥¥\\]\s*([\d,]+)/,
+    /消\s*費\s*税(?!込)[^￥¥\\\d\n]{0,20}[￥¥\\]\s*([\d,]+)/,
+    /消費税額合計\s*([\d,]+)/,
+    /消費税\s+([\d,]+)/,
+    /消\s*費\s*税(?!込)\s*([\d,]+)/,
   ];
   for (const pat of taxPatterns) {
     const m = fullText.match(pat);
     if (m) { taxVal = parseInt(m[1].replace(/,/g, '')); break; }
   }
 
-  // Total: 合計金額 ... ￥ amount
+  // Total: multiple patterns (most specific first)
   let totalVal = null;
   const totalPatterns = [
-    /合\s*計\s*金\s*額\s*[￥¥\\]\s*([\d,]+)/,
-    /合計金額\s*[￥¥\\]\s*([\d,]+)/,
-    /税\s*込\s*合\s*計\s*[￥¥\\]\s*([\d,]+)/,
+    // "合計金額（消費税込） ¥75,130" — allow text between 額 and ¥/digits
+    /合\s*計\s*金\s*額[^0-9\n]{0,20}?[￥¥\\]\s*([\d,]+)/,
+    /合\s*計\s*金\s*額\s*[￥¥\\]?\s*([\d,]+)/,
+    /税\s*込\s*合\s*計\s*[￥¥\\]?\s*([\d,]+)/,
+    // "121,000 円（税込）" pattern — amount before 円（税込）
+    /([\d,]+)\s*円\s*\n?\s*[（(]\s*税込/,
+    /ご\s*請\s*求\s*金\s*額[^￥¥\\\d\n]{0,30}?([\d,]+)\s*円/,
+    // "ご請求金額" followed by number — but NOT "10%" patterns
+    /ご請求金額[\s\n]+([\d][\d,]+)(?!\s*%)/,
     /合\s*計\s*[￥¥\\]\s*([\d,]+)/,
   ];
   for (const pat of totalPatterns) {
     const m = fullText.match(pat);
-    if (m) { totalVal = parseInt(m[1].replace(/,/g, '')); break; }
+    if (m) {
+      const v = parseInt(m[1].replace(/,/g, ''));
+      if (v > 100) { totalVal = v; break; }
+    }
   }
 
-  // Strategy 2: Extract ALL yen amounts from the document
+  // Subtotal: 税抜, 小計
+  let subtotalVal = null;
+  const subtotalPatterns = [
+    /税\s*抜[金額計合]*\s*[￥¥\\]?\s*([\d,]+)/,
+    /小\s*計\s*[￥¥\\]?\s*([\d,]+)/,
+    /小\s*計\s+([\d,]+)/,
+  ];
+  for (const pat of subtotalPatterns) {
+    const m = fullText.match(pat);
+    if (m) { subtotalVal = parseInt(m[1].replace(/,/g, '')); break; }
+  }
+
+  // Extract ALL yen amounts from the document
   const allAmountRegex = /[￥¥\\]\s*([\d,]+)/g;
   const amounts = [];
   let m;
@@ -417,62 +625,77 @@ async function parsePDF(file) {
     if (val > 0) amounts.push(val);
   }
 
-  // Strategy 3: If labeled extraction failed, use amount list heuristic
-  if (totalVal) {
-    inv.total = totalVal;
-  }
-  if (taxVal) {
-    inv.tax = taxVal;
+  // Also extract plain number amounts near "円"
+  const enAmounts = [];
+  const enRegex = /([\d,]+)\s*円/g;
+  while ((m = enRegex.exec(fullText)) !== null) {
+    const val = parseInt(m[1].replace(/,/g, ''));
+    if (val > 0) enAmounts.push(val);
   }
 
-  // If we have total and tax, derive subtotal
-  if (inv.total && inv.tax) {
+  // Assign found values
+  if (totalVal) inv.total = totalVal;
+  if (taxVal) inv.tax = taxVal;
+  if (subtotalVal) inv.subtotal = subtotalVal;
+
+  // Derive missing values
+  if (inv.total && inv.tax && !inv.subtotal) {
     inv.subtotal = inv.total - inv.tax;
-  } else if (!inv.total && amounts.length >= 2) {
-    // Fallback: largest amount is likely the total
-    const sorted = [...new Set(amounts)].sort((a, b) => b - a);
-    inv.total = sorted[0];
-    // Try to find tax: look for a value that is ~10% of (total - value)
-    for (let i = 1; i < sorted.length; i++) {
-      const candidateTax = sorted[i];
-      const candidateSubtotal = inv.total - candidateTax;
-      if (candidateSubtotal > 0) {
-        const expected10 = Math.round(candidateSubtotal * 0.10);
-        const expected8 = Math.round(candidateSubtotal * 0.08);
-        if (Math.abs(candidateTax - expected10) <= 1) {
-          inv.tax = candidateTax;
-          inv.subtotal = candidateSubtotal;
-          break;
-        } else if (Math.abs(candidateTax - expected8) <= 1) {
-          inv.tax = candidateTax;
-          inv.subtotal = candidateSubtotal;
-          break;
-        }
+  } else if (inv.subtotal && inv.tax && !inv.total) {
+    inv.total = inv.subtotal + inv.tax;
+  } else if (inv.subtotal && inv.total && !inv.tax) {
+    inv.tax = inv.total - inv.subtotal;
+  }
+
+  // Sanity check: if total is suspiciously small compared to subtotal or tax,
+  // recompute from subtotal + tax (handles garbled .doc extraction like "￥11" instead of "￥110,000")
+  if (inv.subtotal && inv.tax && inv.total && inv.total < inv.subtotal) {
+    inv.total = inv.subtotal + inv.tax;
+  }
+
+  // Fix for .doc files where "合計￥X" is actually the subtotal and "税込合計" is garbled:
+  // If total × 10% ≈ tax, then what we captured as "total" is really the subtotal.
+  if (inv.total && inv.tax && !subtotalVal) {
+    const exp10 = Math.round(inv.total * 0.10);
+    const exp8 = Math.round(inv.total * 0.08);
+    if (Math.abs(exp10 - inv.tax) <= 1) {
+      inv.subtotal = inv.total;
+      inv.total = inv.total + inv.tax;
+    } else if (Math.abs(exp8 - inv.tax) <= 1) {
+      inv.subtotal = inv.total;
+      inv.total = inv.total + inv.tax;
+    }
+  }
+
+  // Fallback: if still no total, use heuristic on all amounts
+  const allNums = [...new Set([...amounts, ...enAmounts])].sort((a, b) => b - a);
+
+  if (!inv.total && allNums.length >= 1) {
+    inv.total = allNums[0];
+  }
+
+  if (inv.total && !inv.tax) {
+    // Search for matching tax
+    for (const amt of allNums) {
+      if (amt >= inv.total || amt === 0) continue;
+      const sub = inv.total - amt;
+      const exp10 = Math.round(sub * 0.10);
+      const exp8 = Math.round(sub * 0.08);
+      if (Math.abs(amt - exp10) <= 1) {
+        inv.tax = amt; inv.subtotal = sub; break;
+      } else if (Math.abs(amt - exp8) <= 1) {
+        inv.tax = amt; inv.subtotal = sub; break;
       }
     }
-    // If still no tax found, try: second largest = subtotal, smallest = tax
-    if (!inv.tax && sorted.length >= 3) {
-      const candidateTax = sorted[sorted.length - 1];
-      const candidateSubtotal = sorted[1];
-      if (candidateSubtotal + candidateTax === inv.total ||
-          Math.abs((candidateSubtotal + candidateTax) - inv.total) <= 1) {
-        inv.tax = candidateTax;
-        inv.subtotal = candidateSubtotal;
-      }
-    }
-  } else if (inv.total && !inv.tax && amounts.length >= 2) {
-    // We have total but no tax - search amounts for a matching tax value
-    for (const amt of amounts) {
-      if (amt < inv.total && amt !== inv.total) {
-        const candidateSubtotal = inv.total - amt;
-        const expected10 = Math.round(candidateSubtotal * 0.10);
-        const expected8 = Math.round(candidateSubtotal * 0.08);
-        if (Math.abs(amt - expected10) <= 1 || Math.abs(amt - expected8) <= 1) {
-          inv.tax = amt;
-          inv.subtotal = candidateSubtotal;
-          break;
-        }
-      }
+  }
+
+  if (inv.total && !inv.tax) {
+    // Try: total = subtotal * 1.1
+    const sub10 = Math.round(inv.total / 1.10);
+    const tax10 = inv.total - sub10;
+    if (Math.abs(sub10 * 0.10 - tax10) <= 1) {
+      inv.subtotal = sub10;
+      inv.tax = tax10;
     }
   }
 
@@ -509,12 +732,32 @@ async function parsePDF(file) {
   }
 
   // Extract month from filename or date
-  const monthFromFile = file.name.match(/(\d{4})[_\-](\d{1,2})/);
+  const monthFromFile = fileName.match(/(\d{4})[_\-](\d{1,2})/);
   const monthFromDate = inv.date ? inv.date.match(/(\d{4})\/(\d{2})/) : null;
   if (monthFromDate) inv.month = `${monthFromDate[1]}/${monthFromDate[2]}`;
   else if (monthFromFile) inv.month = `${monthFromFile[1]}/${monthFromFile[2].padStart(2,'0')}`;
 
   return inv;
+}
+
+// ===== PDF Parsing =====
+async function parsePDF(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const rawText = await extractTextFromPDF(pdf);
+  return parseInvoiceText(rawText, file.name, 'pdf');
+}
+
+// ===== Word .doc Parsing =====
+async function parseDOC(file) {
+  const text = await extractTextFromDOC(file);
+  return parseInvoiceText(text, file.name, 'doc');
+}
+
+// ===== Word .docx Parsing =====
+async function parseDOCX(file) {
+  const text = await extractTextFromDOCXAsync(file);
+  return parseInvoiceText(text, file.name, 'docx');
 }
 
 // ===== Rendering =====
@@ -533,40 +776,65 @@ function fmt(n) {
 }
 
 function renderSummary() {
-  const issued = allInvoices.filter(i => i.type === 'issued');
-  const received = allInvoices.filter(i => i.type === 'received');
+  const issued = allInvoices.filter(i => i.type === 'issued' && !i.error);
+  const received = allInvoices.filter(i => i.type === 'received' && !i.error);
   const errors = allInvoices.filter(i => i.taxCheck === 'error' || i.totalCheck === 'error');
-  const totalIssued = issued.reduce((s, i) => s + (i.total || 0), 0);
-  const totalReceived = received.reduce((s, i) => s + (i.total || 0), 0);
+
+  const totalIssuedTaxInc = issued.reduce((s, i) => s + (i.total || 0), 0);
+  const totalIssuedTaxExc = issued.reduce((s, i) => s + (i.subtotal || 0), 0);
+  const totalReceivedTaxInc = received.reduce((s, i) => s + (i.total || 0), 0);
+  const totalReceivedTaxExc = received.reduce((s, i) => s + (i.subtotal || 0), 0);
 
   document.getElementById('summaryCards').innerHTML = `
-    <div class="card"><div class="card-label">読み取り件数</div><div class="card-value blue">${allInvoices.length}件</div></div>
-    <div class="card"><div class="card-label">発行（売上）</div><div class="card-value green">${fmt(totalIssued)}</div><div class="card-label">${issued.length}件</div></div>
-    <div class="card"><div class="card-label">受領（支払）</div><div class="card-value orange">${fmt(totalReceived)}</div><div class="card-label">${received.length}件</div></div>
-    <div class="card"><div class="card-label">計算エラー</div><div class="card-value ${errors.length > 0 ? 'red' : 'green'}">${errors.length}件</div></div>
-    <div class="card"><div class="card-label">差引（売上−支払）</div><div class="card-value ${totalIssued - totalReceived >= 0 ? 'blue' : 'red'}">${fmt(totalIssued - totalReceived)}</div></div>
+    <div class="card">
+      <div class="card-label">読み取り件数</div>
+      <div class="card-value blue">${allInvoices.length}件</div>
+      <div class="card-sub">PDF: ${allInvoices.filter(i=>i.fileType==='pdf').length} / Word: ${allInvoices.filter(i=>i.fileType==='doc'||i.fileType==='docx').length}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">発行（売上）税込</div>
+      <div class="card-value green">${fmt(totalIssuedTaxInc)}</div>
+      <div class="card-sub">税抜: ${fmt(totalIssuedTaxExc)} ｜ ${issued.length}件</div>
+    </div>
+    <div class="card">
+      <div class="card-label">受領（支払）税込</div>
+      <div class="card-value orange">${fmt(totalReceivedTaxInc)}</div>
+      <div class="card-sub">税抜: ${fmt(totalReceivedTaxExc)} ｜ ${received.length}件</div>
+    </div>
+    <div class="card">
+      <div class="card-label">計算エラー</div>
+      <div class="card-value ${errors.length > 0 ? 'red' : 'green'}">${errors.length}件</div>
+    </div>
+    <div class="card">
+      <div class="card-label">差引（売上−支払）税込</div>
+      <div class="card-value ${totalIssuedTaxInc - totalReceivedTaxInc >= 0 ? 'blue' : 'red'}">${fmt(totalIssuedTaxInc - totalReceivedTaxInc)}</div>
+      <div class="card-sub">税抜: ${fmt(totalIssuedTaxExc - totalReceivedTaxExc)}</div>
+    </div>
   `;
 }
 
 function renderDetailTable() {
   const table = document.getElementById('detailTable');
   let html = `<thead><tr>
-    <th>ファイル名</th><th>日付</th><th>取引先</th><th>種別</th>
-    <th class="amount">税抜金額</th><th class="amount">消費税</th><th class="amount">合計</th><th>ステータス</th>
+    <th>ファイル名</th><th>形式</th><th>日付</th><th>取引先</th><th>種別</th>
+    <th class="amount">税抜金額</th><th class="amount">消費税</th><th class="amount">税込金額</th><th>ステータス</th>
   </tr></thead><tbody>`;
 
   for (const inv of allInvoices) {
     if (inv.error) {
-      html += `<tr><td>${inv.fileName}</td><td colspan="6">読み取りエラー: ${inv.errorMsg || ''}</td><td class="status-err">⚠ エラー</td></tr>`;
+      html += `<tr><td>${inv.fileName}</td><td colspan="7">読み取りエラー: ${inv.errorMsg || ''}</td><td class="status-err">⚠ エラー</td></tr>`;
       continue;
     }
     const typeLabel = inv.type === 'issued' ? '📤 発行' : inv.type === 'received' ? '📥 受領' : '❓';
+    const badge = inv.fileType === 'pdf' ? '<span class="file-type-badge badge-pdf">PDF</span>'
+      : '<span class="file-type-badge badge-doc">DOC</span>';
     const status = inv.taxCheck === 'error' || inv.totalCheck === 'error'
       ? '<span class="status-err">❌ エラー</span>'
       : inv.taxCheck === 'warning' ? '<span class="status-warn">⚠ 要確認</span>'
       : '<span class="status-ok">✅ OK</span>';
     html += `<tr>
-      <td title="${inv.fileName}">${inv.fileName.length > 35 ? inv.fileName.slice(0,35)+'...' : inv.fileName}</td>
+      <td title="${inv.fileName}">${inv.fileName.length > 30 ? inv.fileName.slice(0,30)+'...' : inv.fileName}</td>
+      <td>${badge}</td>
       <td>${inv.date || '—'}</td>
       <td>${inv.client || '—'}</td>
       <td>${typeLabel}</td>
@@ -579,7 +847,6 @@ function renderDetailTable() {
   html += '</tbody>';
   table.innerHTML = html;
 
-  // Wire up filters
   document.getElementById('filterText').oninput = filterDetail;
   document.getElementById('filterType').onchange = filterDetail;
 }
@@ -601,7 +868,7 @@ function renderCheckTable() {
   let html = `<thead><tr>
     <th>ファイル名</th><th class="amount">税抜</th><th class="amount">消費税</th>
     <th>税率</th><th class="amount">期待税額</th><th>税額チェック</th>
-    <th class="amount">合計</th><th>合計チェック</th><th>詳細</th>
+    <th class="amount">税込合計</th><th>合計チェック</th><th>詳細</th>
   </tr></thead><tbody>`;
 
   for (const inv of allInvoices) {
@@ -640,28 +907,32 @@ function renderClientAgg() {
   const clientMap = {};
   allInvoices.filter(i => !i.error).forEach(inv => {
     const key = inv.client || '不明';
-    if (!clientMap[key]) clientMap[key] = { count: 0, total: 0, type: inv.type };
+    if (!clientMap[key]) clientMap[key] = { count: 0, totalTaxInc: 0, totalTaxExc: 0, type: inv.type };
     clientMap[key].count++;
-    clientMap[key].total += inv.total || 0;
+    clientMap[key].totalTaxInc += inv.total || 0;
+    clientMap[key].totalTaxExc += inv.subtotal || 0;
   });
 
-  const sorted = Object.entries(clientMap).sort((a, b) => b[1].total - a[1].total);
-  let html = `<thead><tr><th>取引先</th><th>種別</th><th>件数</th><th class="amount">合計金額</th></tr></thead><tbody>`;
+  const sorted = Object.entries(clientMap).sort((a, b) => b[1].totalTaxInc - a[1].totalTaxInc);
+  let html = `<thead><tr><th>取引先</th><th>種別</th><th>件数</th><th class="amount">税抜金額</th><th class="amount">税込金額</th></tr></thead><tbody>`;
   sorted.forEach(([name, d]) => {
-    html += `<tr><td>${name}</td><td>${d.type === 'issued' ? '売上' : '支払'}</td><td>${d.count}</td><td class="amount" style="font-weight:700">${fmt(d.total)}</td></tr>`;
+    html += `<tr><td>${name}</td><td>${d.type === 'issued' ? '売上' : '支払'}</td><td>${d.count}</td>
+      <td class="amount">${fmt(d.totalTaxExc)}</td>
+      <td class="amount" style="font-weight:700">${fmt(d.totalTaxInc)}</td></tr>`;
   });
   html += '</tbody>';
   document.getElementById('clientTable').innerHTML = html;
 
   // Chart
   const top10 = sorted.slice(0, 10);
-  new Chart(document.getElementById('clientChart'), {
+  if (window._clientChart) window._clientChart.destroy();
+  window._clientChart = new Chart(document.getElementById('clientChart'), {
     type: 'bar',
     data: {
       labels: top10.map(([n]) => n.length > 10 ? n.slice(0,10)+'…' : n),
       datasets: [{
-        label: '合計金額（円）',
-        data: top10.map(([,d]) => d.total),
+        label: '税込金額（円）',
+        data: top10.map(([,d]) => d.totalTaxInc),
         backgroundColor: top10.map(([,d]) => d.type === 'issued' ? '#4361ee' : '#f39c12'),
       }]
     },
@@ -677,35 +948,52 @@ function renderClientAgg() {
 function renderMonthlyAgg() {
   const monthMap = {};
   allInvoices.filter(i => !i.error && i.month).forEach(inv => {
-    if (!monthMap[inv.month]) monthMap[inv.month] = { issued: 0, received: 0, issuedCount: 0, receivedCount: 0 };
-    if (inv.type === 'issued') { monthMap[inv.month].issued += inv.total || 0; monthMap[inv.month].issuedCount++; }
-    else { monthMap[inv.month].received += inv.total || 0; monthMap[inv.month].receivedCount++; }
+    if (!monthMap[inv.month]) monthMap[inv.month] = {
+      issuedTaxInc: 0, issuedTaxExc: 0, receivedTaxInc: 0, receivedTaxExc: 0,
+      issuedCount: 0, receivedCount: 0
+    };
+    if (inv.type === 'issued') {
+      monthMap[inv.month].issuedTaxInc += inv.total || 0;
+      monthMap[inv.month].issuedTaxExc += inv.subtotal || 0;
+      monthMap[inv.month].issuedCount++;
+    } else {
+      monthMap[inv.month].receivedTaxInc += inv.total || 0;
+      monthMap[inv.month].receivedTaxExc += inv.subtotal || 0;
+      monthMap[inv.month].receivedCount++;
+    }
   });
 
   const sorted = Object.entries(monthMap).sort((a, b) => a[0].localeCompare(b[0]));
-  let html = `<thead><tr><th>月</th><th>売上件数</th><th class="amount">売上合計</th><th>支払件数</th><th class="amount">支払合計</th><th class="amount">差引</th></tr></thead><tbody>`;
+  let html = `<thead><tr><th>月</th><th>売上件数</th><th class="amount">売上（税抜）</th><th class="amount">売上（税込）</th>
+    <th>支払件数</th><th class="amount">支払（税抜）</th><th class="amount">支払（税込）</th><th class="amount">差引（税込）</th></tr></thead><tbody>`;
   sorted.forEach(([month, d]) => {
-    const diff = d.issued - d.received;
-    html += `<tr><td>${month}</td><td>${d.issuedCount}</td><td class="amount" style="color:#4361ee">${fmt(d.issued)}</td>
-      <td>${d.receivedCount}</td><td class="amount" style="color:#f39c12">${fmt(d.received)}</td>
+    const diff = d.issuedTaxInc - d.receivedTaxInc;
+    html += `<tr><td>${month}</td>
+      <td>${d.issuedCount}</td>
+      <td class="amount">${fmt(d.issuedTaxExc)}</td>
+      <td class="amount" style="color:#4361ee">${fmt(d.issuedTaxInc)}</td>
+      <td>${d.receivedCount}</td>
+      <td class="amount">${fmt(d.receivedTaxExc)}</td>
+      <td class="amount" style="color:#f39c12">${fmt(d.receivedTaxInc)}</td>
       <td class="amount" style="font-weight:700;color:${diff >= 0 ? '#2ecc71' : '#e74c3c'}">${fmt(diff)}</td></tr>`;
   });
   html += '</tbody>';
   document.getElementById('monthlyTable').innerHTML = html;
 
   // Chart
-  new Chart(document.getElementById('monthlyChart'), {
+  if (window._monthlyChart) window._monthlyChart.destroy();
+  window._monthlyChart = new Chart(document.getElementById('monthlyChart'), {
     type: 'bar',
     data: {
       labels: sorted.map(([m]) => m),
       datasets: [
-        { label: '売上', data: sorted.map(([,d]) => d.issued), backgroundColor: '#4361ee' },
-        { label: '支払', data: sorted.map(([,d]) => d.received), backgroundColor: '#f39c12' },
+        { label: '売上（税込）', data: sorted.map(([,d]) => d.issuedTaxInc), backgroundColor: '#4361ee' },
+        { label: '支払（税込）', data: sorted.map(([,d]) => d.receivedTaxInc), backgroundColor: '#f39c12' },
       ]
     },
     options: {
       responsive: true,
-      plugins: { title: { display: true, text: '月別 売上 vs 支払' } },
+      plugins: { title: { display: true, text: '月別 売上 vs 支払（税込）' } },
       scales: { y: { ticks: { callback: v => '¥' + (v/10000).toFixed(0) + '万' } } }
     }
   });
@@ -714,9 +1002,9 @@ function renderMonthlyAgg() {
 // ===== CSV Export =====
 function exportCSV() {
   const BOM = '\uFEFF';
-  let csv = BOM + 'ファイル名,日付,取引先,種別,税抜金額,消費税,合計金額,税率,税額チェック,合計チェック\n';
+  let csv = BOM + 'ファイル名,形式,日付,取引先,種別,税抜金額,消費税,税込金額,税率,税額チェック,合計チェック\n';
   allInvoices.filter(i => !i.error).forEach(inv => {
-    csv += `"${inv.fileName}","${inv.date}","${inv.client}","${inv.type === 'issued' ? '発行' : '受領'}",${inv.subtotal || ''},${inv.tax || ''},${inv.total || ''},${inv.taxRate || ''},${inv.taxCheck},${inv.totalCheck}\n`;
+    csv += `"${inv.fileName}","${inv.fileType}","${inv.date}","${inv.client}","${inv.type === 'issued' ? '発行' : '受領'}",${inv.subtotal || ''},${inv.tax || ''},${inv.total || ''},${inv.taxRate || ''},${inv.taxCheck},${inv.totalCheck}\n`;
   });
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
