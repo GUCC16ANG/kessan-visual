@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>請求書チェッカー｜株式会社十六小節</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: 'Helvetica Neue', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', sans-serif; background: #f0f2f5; color: #1a1a2e; }
@@ -84,22 +85,23 @@ select.filter-input { width: auto; }
 .file-type-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
 .badge-pdf { background: #fee2e2; color: #dc2626; }
 .badge-doc { background: #dbeafe; color: #2563eb; }
+.badge-xls { background: #dcfce7; color: #16a34a; }
 </style>
 </head>
 <body>
 
 <div class="header">
   <h1>📋 請求書チェッカー</h1>
-  <p>株式会社十六小節｜PDF・Word請求書の自動読み取り・計算チェック・集計ツール</p>
+  <p>株式会社十六小節｜PDF・Word・Excel請求書の自動読み取り・計算チェック・集計ツール</p>
 </div>
 
 <div class="container">
   <!-- Drop Zone -->
   <div class="drop-zone" id="dropZone">
     <div class="drop-zone-icon">📄</div>
-    <div class="drop-zone-text">PDF・Wordファイルをドラッグ＆ドロップ、またはクリックして選択</div>
-    <div class="drop-zone-sub">対応形式: .pdf / .doc / .docx ｜複数ファイル・フォルダ対応</div>
-    <input type="file" id="fileInput" multiple accept=".pdf,.doc,.docx" style="display:none">
+    <div class="drop-zone-text">PDF・Word・Excelファイルをドラッグ＆ドロップ、またはクリックして選択</div>
+    <div class="drop-zone-sub">対応形式: .pdf / .doc / .docx / .xlsx / .xls ｜複数ファイル・フォルダ対応</div>
+    <input type="file" id="fileInput" multiple accept=".pdf,.doc,.docx,.xlsx,.xls" style="display:none">
   </div>
 
   <div class="progress-bar" id="progressBar"><div class="progress-fill" id="progressFill"></div></div>
@@ -223,12 +225,12 @@ async function collectFilesFromEntries(entries) {
 }
 
 async function handleFiles(fileList) {
-  const supportedExts = ['.pdf', '.doc', '.docx'];
+  const supportedExts = ['.pdf', '.doc', '.docx', '.xlsx', '.xls'];
   const files = Array.from(fileList).filter(f => {
     const ext = f.name.toLowerCase().slice(f.name.lastIndexOf('.'));
     return supportedExts.includes(ext) && !f.name.startsWith('~$') && !f.name.startsWith('.');
   });
-  if (files.length === 0) { alert('対応ファイルが見つかりません（PDF / Word）'); return; }
+  if (files.length === 0) { alert('対応ファイルが見つかりません（PDF / Word / Excel）'); return; }
 
   const progressBar = document.getElementById('progressBar');
   const progressFill = document.getElementById('progressFill');
@@ -250,6 +252,8 @@ async function handleFiles(fileList) {
         inv = await parseDOC(files[i]);
       } else if (ext === '.docx') {
         inv = await parseDOCX(files[i]);
+      } else if (ext === '.xlsx' || ext === '.xls') {
+        inv = await parseXLSX(files[i]);
       }
       if (inv) allInvoices.push(inv);
     } catch (e) {
@@ -760,6 +764,192 @@ async function parseDOCX(file) {
   return parseInvoiceText(text, file.name, 'docx');
 }
 
+// ===== Excel (.xlsx / .xls) Parsing =====
+async function parseXLSX(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+
+  // Try to extract structured invoice data from cells first, then fall back to text-based parsing
+  let inv = extractInvoiceFromWorkbook(workbook, file.name);
+  if (inv) return inv;
+
+  // Fallback: convert all sheets to text and use the standard text parser
+  let allText = '';
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    // Get all cell values as text, preserving layout with tabs
+    const csv = XLSX.utils.sheet_to_csv(sheet, { FS: '\t', RS: '\n', blankrows: false });
+    allText += csv + '\n';
+  }
+  return parseInvoiceText(allText, file.name, 'xlsx');
+}
+
+// Try to extract invoice data by scanning cell values for keywords
+function extractInvoiceFromWorkbook(workbook, fileName) {
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet['!ref']) continue;
+
+    const range = XLSX.utils.decode_range(sheet['!ref']);
+    const cells = {};
+
+    // Build a map of all cell values
+    for (let r = range.s.r; r <= range.e.r; r++) {
+      for (let c = range.s.c; c <= range.e.c; c++) {
+        const addr = XLSX.utils.encode_cell({ r, c });
+        const cell = sheet[addr];
+        if (cell && cell.v != null) {
+          cells[addr] = { r, c, v: cell.v, w: cell.w || String(cell.v), t: cell.t };
+        }
+      }
+    }
+
+    // Look for keyword-value pairs in adjacent cells (label in one cell, value in the next)
+    let subtotal = null, tax = null, total = null;
+    let date = null, client = null, regNo = null;
+    let foundInvoiceKeyword = false;
+
+    const cellList = Object.values(cells);
+    for (const cell of cellList) {
+      const text = String(cell.w || cell.v).trim();
+      const normalizedText = normalizeCJK(text);
+
+      // Check if this looks like an invoice at all
+      if (/請求書|御請求|インボイス/.test(normalizedText)) foundInvoiceKeyword = true;
+
+      // Helper: get numeric value from the cell to the right, or 2 cells right
+      const getAdjacentNum = () => {
+        for (let dc = 1; dc <= 3; dc++) {
+          const rightAddr = XLSX.utils.encode_cell({ r: cell.r, c: cell.c + dc });
+          const rightCell = cells[rightAddr];
+          if (rightCell) {
+            const val = typeof rightCell.v === 'number' ? rightCell.v :
+              parseInt(String(rightCell.w || rightCell.v).replace(/[￥¥\\,\s円]/g, ''));
+            if (!isNaN(val) && val > 0) return val;
+          }
+        }
+        // Also check if the value is embedded in the same cell text (e.g., "合計 ¥100,000")
+        const m = normalizedText.match(/[￥¥\\]\s*([\d,]+)/);
+        if (m) return parseInt(m[1].replace(/,/g, ''));
+        return null;
+      };
+
+      // Total patterns
+      if (/合\s*計\s*金\s*額|税\s*込\s*合\s*計|ご\s*請\s*求\s*金\s*額/.test(normalizedText)) {
+        const v = getAdjacentNum();
+        if (v && v > 100) total = v;
+      }
+      // Subtotal
+      else if (/税\s*抜|小\s*計/.test(normalizedText) && !/税\s*込/.test(normalizedText)) {
+        const v = getAdjacentNum();
+        if (v && v > 100) subtotal = v;
+      }
+      // Tax (but not "消費税込")
+      else if (/消\s*費\s*税/.test(normalizedText) && !/消\s*費\s*税\s*込/.test(normalizedText)) {
+        const v = getAdjacentNum();
+        if (v && v > 0) tax = v;
+      }
+      // Date
+      else if (/請求日|発行日|日付/.test(normalizedText)) {
+        const rightAddr = XLSX.utils.encode_cell({ r: cell.r, c: cell.c + 1 });
+        const rightCell = cells[rightAddr];
+        if (rightCell) {
+          const dText = String(rightCell.w || rightCell.v);
+          const dm = dText.match(/(\d{4})[\/\-年](\d{1,2})[\/\-月](\d{1,2})/);
+          if (dm) date = `${dm[1]}/${dm[2].padStart(2,'0')}/${dm[3].padStart(2,'0')}`;
+        }
+      }
+      // Client (御中)
+      if (/御\s*中/.test(normalizedText)) {
+        const clientText = normalizedText.replace(/\s*御\s*中.*/, '').trim();
+        if (clientText.length >= 2) client = clientText;
+      }
+      // Registration number
+      if (/登録番号/.test(normalizedText)) {
+        const m = normalizedText.match(/T[\d\-]+/) || (() => {
+          const rightAddr = XLSX.utils.encode_cell({ r: cell.r, c: cell.c + 1 });
+          const rc = cells[rightAddr];
+          return rc ? String(rc.w || rc.v).match(/T[\d\-]+/) : null;
+        })();
+        if (m) regNo = m[0];
+      }
+    }
+
+    // Only use structured extraction if we found invoice-like content with at least a total
+    if (foundInvoiceKeyword && (total || subtotal)) {
+      const inv = {
+        fileName, fileType: 'xlsx', error: false,
+        date: date || '', client: client || '', items: [],
+        subtotal, tax, total,
+        taxRate: null, type: 'unknown', registrationNo: regNo || '',
+      };
+
+      // Type detection
+      if (client && /十六小節|１６小節|16小節/.test(client)) {
+        inv.type = 'received';
+      } else {
+        inv.type = 'issued';
+      }
+
+      // Derive missing values
+      if (inv.total && inv.tax && !inv.subtotal) inv.subtotal = inv.total - inv.tax;
+      else if (inv.subtotal && inv.tax && !inv.total) inv.total = inv.subtotal + inv.tax;
+      else if (inv.subtotal && inv.total && !inv.tax) inv.tax = inv.total - inv.subtotal;
+
+      // Subtotal/total correction (same as other formats)
+      if (inv.subtotal && inv.tax && inv.total && inv.total < inv.subtotal) {
+        inv.total = inv.subtotal + inv.tax;
+      }
+      if (inv.total && inv.tax && !subtotal) {
+        const exp10 = Math.round(inv.total * 0.10);
+        const exp8 = Math.round(inv.total * 0.08);
+        if (Math.abs(exp10 - inv.tax) <= 1) { inv.subtotal = inv.total; inv.total = inv.total + inv.tax; }
+        else if (Math.abs(exp8 - inv.tax) <= 1) { inv.subtotal = inv.total; inv.total = inv.total + inv.tax; }
+      }
+
+      // Fallback total
+      if (!inv.total && inv.subtotal) {
+        inv.total = inv.subtotal;
+      }
+      if (inv.total && !inv.tax) {
+        const sub10 = Math.round(inv.total / 1.10);
+        const tax10 = inv.total - sub10;
+        if (Math.abs(sub10 * 0.10 - tax10) <= 1) { inv.subtotal = sub10; inv.tax = tax10; }
+      }
+
+      // Tax check
+      if (inv.subtotal && inv.tax) {
+        const expected10 = Math.round(inv.subtotal * 0.10);
+        const expected8 = Math.round(inv.subtotal * 0.08);
+        if (Math.abs(inv.tax - expected10) <= 1) { inv.taxRate = 10; inv.taxCheck = 'ok'; }
+        else if (Math.abs(inv.tax - expected8) <= 1) { inv.taxRate = 8; inv.taxCheck = 'ok'; }
+        else { inv.taxCheck = 'error'; inv.taxCheckMsg = `税額不一致: 税抜${inv.subtotal.toLocaleString()}円 × 10% = ${expected10.toLocaleString()}円 ≠ ${inv.tax.toLocaleString()}円`; }
+      } else {
+        inv.taxCheck = 'warning'; inv.taxCheckMsg = '金額の読み取りが不完全です';
+      }
+
+      // Total check
+      if (inv.subtotal && inv.tax && inv.total) {
+        const expectedTotal = inv.subtotal + inv.tax;
+        if (Math.abs(expectedTotal - inv.total) <= 1) inv.totalCheck = 'ok';
+        else { inv.totalCheck = 'error'; inv.totalCheckMsg = `合計不一致: ${inv.subtotal.toLocaleString()} + ${inv.tax.toLocaleString()} = ${expectedTotal.toLocaleString()} ≠ ${inv.total.toLocaleString()}`; }
+      } else {
+        inv.totalCheck = 'warning';
+      }
+
+      // Month
+      const monthFromFile = fileName.match(/(\d{4})[_\-](\d{1,2})/);
+      const monthFromDate = inv.date ? inv.date.match(/(\d{4})\/(\d{2})/) : null;
+      if (monthFromDate) inv.month = `${monthFromDate[1]}/${monthFromDate[2]}`;
+      else if (monthFromFile) inv.month = `${monthFromFile[1]}/${monthFromFile[2].padStart(2,'0')}`;
+
+      return inv;
+    }
+  }
+
+  return null; // Fall back to text-based parsing
+}
+
 // ===== Rendering =====
 function renderAll() {
   document.getElementById('results').classList.remove('hidden');
@@ -789,7 +979,7 @@ function renderSummary() {
     <div class="card">
       <div class="card-label">読み取り件数</div>
       <div class="card-value blue">${allInvoices.length}件</div>
-      <div class="card-sub">PDF: ${allInvoices.filter(i=>i.fileType==='pdf').length} / Word: ${allInvoices.filter(i=>i.fileType==='doc'||i.fileType==='docx').length}</div>
+      <div class="card-sub">PDF: ${allInvoices.filter(i=>i.fileType==='pdf').length} / Word: ${allInvoices.filter(i=>i.fileType==='doc'||i.fileType==='docx').length} / Excel: ${allInvoices.filter(i=>i.fileType==='xlsx').length}</div>
     </div>
     <div class="card">
       <div class="card-label">発行（売上）税込</div>
@@ -827,6 +1017,7 @@ function renderDetailTable() {
     }
     const typeLabel = inv.type === 'issued' ? '📤 発行' : inv.type === 'received' ? '📥 受領' : '❓';
     const badge = inv.fileType === 'pdf' ? '<span class="file-type-badge badge-pdf">PDF</span>'
+      : inv.fileType === 'xlsx' ? '<span class="file-type-badge badge-xls">XLS</span>'
       : '<span class="file-type-badge badge-doc">DOC</span>';
     const status = inv.taxCheck === 'error' || inv.totalCheck === 'error'
       ? '<span class="status-err">❌ エラー</span>'
